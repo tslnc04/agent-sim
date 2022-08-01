@@ -1,4 +1,4 @@
-use agent_sim::{dist, Agent, Status};
+use agent_sim::{Agent, World};
 use rand::Rng;
 use std::{thread, time};
 
@@ -8,7 +8,7 @@ fn main() {
 
     for i in 0..10 {
         for j in 0..10 {
-            if rng.gen_bool(0.4) {
+            if rng.gen_bool(0.1) {
                 agents.push(Agent::new((i as f64, j as f64)));
             }
         }
@@ -16,34 +16,13 @@ fn main() {
 
     agents[0].infect();
 
-    for time in 0..100 {
-        for i in 0..agents.len() {
-            for j in i + 1..agents.len() {
-                if dist(agents[i].pos, agents[j].pos) < 2.0 {
-                    if let Status::Infectious(_) = agents[i].status {
-                        agents[j].infect();
-                    } else if let Status::Infectious(_) = agents[j].status {
-                        agents[i].infect();
-                    }
-                }
-            }
-        }
+    let mut world = World::new_with_agents((10.0, 10.0), agents);
 
-        println!("----- Time {:2} -----", time);
-        for agent in agents.iter() {
-            match agent.status {
-                Status::Susceptible => print!(" S "),
-                Status::Exposed(t) => print!("E{} ", t),
-                Status::Infectious(t) => print!("I{} ", t),
-                Status::Recovered => print!(" R "),
-            }
-        }
-        println!();
+    println!("{}", world);
+    for _ in 0..100 {
+        world.step();
+        println!("{}", world);
 
-        for agent in agents.iter_mut() {
-            agent.step();
-        }
-
-        thread::sleep(time::Duration::from_millis(300));
+        thread::sleep(time::Duration::from_millis(1000));
     }
 }
