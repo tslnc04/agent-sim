@@ -4,20 +4,23 @@ use std::collections::HashMap;
 use std::f64::consts::SQRT_2;
 use std::fmt;
 
+pub mod geometry;
+use crate::geometry::Vec2D;
+
 /// World is the wrapper for all simulation, with this struct being responsible
 /// for managing all of the agents and anything else that can happen within the
 /// simulation.
 pub struct World<R: Rng> {
     agents: Vec<Agent>,
     curr_step: i64,
-    size: (f64, f64),
+    size: Vec2D<f64>,
     infected: i64,
     rng: Box<R>,
     pub contacts: ContactGraph,
 }
 
 impl World<rand::prelude::ThreadRng> {
-    pub fn new(size: (f64, f64)) -> Self {
+    pub fn new(size: Vec2D<f64>) -> Self {
         World {
             agents: Vec::new(),
             curr_step: 0,
@@ -28,7 +31,7 @@ impl World<rand::prelude::ThreadRng> {
         }
     }
 
-    pub fn new_with_agents(size: (f64, f64), agents: Vec<Agent>) -> Self {
+    pub fn new_with_agents(size: Vec2D<f64>, agents: Vec<Agent>) -> Self {
         World {
             agents: agents,
             curr_step: 0,
@@ -58,7 +61,7 @@ where
     pub fn step(&mut self) {
         for i in 0..self.agents.len() {
             for j in i + 1..self.agents.len() {
-                if dist(self.agents[i].pos, self.agents[j].pos) < 2.0 {
+                if self.agents[i].pos.dist(self.agents[j].pos) < 2.0 {
                     // agent j attempts to infect agent i, if that fails agent i
                     // attempts to infect agent j
                     if let Some(true) = self.infect_agent(i, j) {
@@ -88,11 +91,11 @@ where
             // generate a movement vector with components in the range of [-1, 1)
             let movement = (distro.sample(&mut self.rng), distro.sample(&mut self.rng));
             // scale the movement based on maximum magnitude and update position
-            agent.pos.0 += movement.0 * max_mag / SQRT_2;
-            agent.pos.1 += movement.1 * max_mag / SQRT_2;
+            agent.pos.x += movement.0 * max_mag / SQRT_2;
+            agent.pos.y += movement.1 * max_mag / SQRT_2;
             // clamp position to world size
-            agent.pos.0 = agent.pos.0.clamp(0.0, self.size.0);
-            agent.pos.1 = agent.pos.1.clamp(0.0, self.size.1);
+            agent.pos.x = agent.pos.x.clamp(0.0, self.size.x);
+            agent.pos.y = agent.pos.y.clamp(0.0, self.size.y);
         }
     }
 
@@ -144,11 +147,11 @@ where
             self.curr_step, self.infected
         )?;
 
-        for i in 0..self.size.0.ceil() as i64 {
-            for j in 0..self.size.1.ceil() as i64 {
+        for i in 0..self.size.x.ceil() as i64 {
+            for j in 0..self.size.y.ceil() as i64 {
                 let mut agent_found = false;
                 for agent in self.agents.iter() {
-                    if agent.pos.0.round() as i64 == i && agent.pos.1.round() as i64 == j {
+                    if agent.pos.x.round() as i64 == i && agent.pos.y.round() as i64 == j {
                         write!(f, "{}", agent)?;
                         agent_found = true;
                         break;
@@ -196,7 +199,7 @@ impl Status {
 /// the position and the status to determine infection and recovery.
 #[derive(Debug)]
 pub struct Agent {
-    pub pos: (f64, f64),
+    pub pos: Vec2D<f64>,
     pub status: Status,
     /// src is the ID of the agent that infected this agent. Since it defaults
     /// to 0, one should check the status before assuming that this agent has
@@ -205,7 +208,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(pos: (f64, f64)) -> Self {
+    pub fn new(pos: Vec2D<f64>) -> Self {
         Agent {
             pos: pos,
             status: Status::Susceptible,
@@ -323,6 +326,7 @@ impl fmt::Display for ContactGraph {
 /// The parent is the source of the infection and the children are all the agents
 /// infected by this node's agent.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ContactNode {
     index: usize,
     parent: Option<usize>,
@@ -342,19 +346,6 @@ impl fmt::Display for ContactNode {
         }
         Ok(())
     }
-}
-
-fn mag(x: (f64, f64)) -> f64 {
-    (x.0 * x.0 + x.1 * x.1).sqrt()
-}
-
-fn dist(x: (f64, f64), y: (f64, f64)) -> f64 {
-    mag((x.0 - y.0, x.1 - y.1))
-}
-
-fn normalize(x: (f64, f64)) -> (f64, f64) {
-    let x_mag = mag(x);
-    (x.0 / x_mag, x.1 / x_mag)
 }
 
 const RED: &str = "\x1b[0;31m";
