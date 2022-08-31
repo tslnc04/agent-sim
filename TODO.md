@@ -9,4 +9,7 @@
 - [X] actually implement basic vector math/positions library
 - [X] `fmt::Display` implementation as a grid
 - [X] display with colors
-- [ ] refactor `lib.rs` into multiple files
+- [-] refactor `lib.rs` into multiple files
+- [ ] handle agent lifecycle (necessary for implementing work/home/school properly)
+- [ ] implement schools, refactor so that there is an array of all special
+  places rather than separate vectors for each type of building

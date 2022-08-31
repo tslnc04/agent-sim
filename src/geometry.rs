@@ -1,18 +1,5 @@
 use num;
-use std::ops::{Add, Div, Mul, Sub};
-
-pub fn mag(x: (f64, f64)) -> f64 {
-    (x.0 * x.0 + x.1 * x.1).sqrt()
-}
-
-pub fn dist(x: (f64, f64), y: (f64, f64)) -> f64 {
-    mag((x.0 - y.0, x.1 - y.1))
-}
-
-pub fn normalize(x: (f64, f64)) -> (f64, f64) {
-    let x_mag = mag(x);
-    (x.0 / x_mag, x.1 / x_mag)
-}
+use std::ops::{Add, AddAssign, Div, Mul, Sub};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Vec2D<T: num::Float> {
@@ -25,37 +12,55 @@ impl<T: num::Float> Vec2D<T> {
         Self { x: x, y: y }
     }
 
-    // TODO(tslnc04): convert mag, dist, and normalize to use operator
-    // overloading rather than the deprecated functions
+    pub fn new_nan() -> Self {
+        Self {
+            x: T::nan(),
+            y: T::nan(),
+        }
+    }
+
+    pub fn new_random<D, R>(x_distro: D, y_distro: D, rng: &mut R) -> Self
+    where
+        D: rand::distributions::Distribution<T>,
+        R: rand::Rng,
+    {
+        Self {
+            x: x_distro.sample(rng),
+            y: y_distro.sample(rng),
+        }
+    }
+
+    /// Returns whether any of the components are NaN
+    pub fn is_nan(&self) -> bool {
+        self.x.is_nan() || self.y.is_nan()
+    }
 
     pub fn mag(&self) -> T {
-        (self.x * self.x + self.y * self.y).sqrt()
+        self.dot(self).sqrt()
     }
 
     pub fn dist(&self, other: Self) -> T {
-        self.sub(other).mag()
+        (*self - other).mag()
     }
 
     pub fn normalize(&self) -> Self {
         self.div(self.mag())
     }
 
-    /// Deprecated: use operator overloading instead
-    pub fn add(&self, other: Self) -> Self {
-        Self::new(self.x + other.x, self.y + other.y)
+    pub fn dot(&self, other: &Self) -> T {
+        self.x * other.x + self.y * other.y
     }
 
-    /// Deprecated: use operator overloading instead
-    pub fn sub(&self, other: Self) -> Self {
-        Self::new(self.x - other.x, self.y - other.y)
-    }
-
-    /// Deprecated: use operator overloading instead
-    pub fn div(&self, other: T) -> Self {
-        Self::new(self.x / other, self.y / other)
+    pub fn clamp_mag(&self, max: T) -> Self {
+        if self.mag() > max {
+            self.normalize() * max
+        } else {
+            *self
+        }
     }
 }
 
+// Vector addition
 impl<T: Add<Output = T> + num::Float> Add for Vec2D<T> {
     type Output = Self;
 
@@ -67,6 +72,14 @@ impl<T: Add<Output = T> + num::Float> Add for Vec2D<T> {
     }
 }
 
+// Vector addition and assignment
+impl<T: Add<Output = T> + num::Float> AddAssign for Vec2D<T> {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+// Vector subtraction
 impl<T: Sub<Output = T> + num::Float> Sub for Vec2D<T> {
     type Output = Self;
 
@@ -78,7 +91,7 @@ impl<T: Sub<Output = T> + num::Float> Sub for Vec2D<T> {
     }
 }
 
-// TODO(tslnc04): figure out how to do scalar by vector multiplication
+// Computes the Hadamard product of two vectors
 impl<T: Mul<Output = T> + num::Float> Mul for Vec2D<T> {
     type Output = Self;
 
@@ -90,6 +103,19 @@ impl<T: Mul<Output = T> + num::Float> Mul for Vec2D<T> {
     }
 }
 
+// Vector by scalar multiplication
+impl<T: Mul<Output = T> + num::Float> Mul<T> for Vec2D<T> {
+    type Output = Self;
+
+    fn mul(self, other: T) -> Self::Output {
+        Self {
+            x: self.x * other,
+            y: self.y * other,
+        }
+    }
+}
+
+// Hadamard division of two vectors
 impl<T: Div<Output = T> + num::Float> Div for Vec2D<T> {
     type Output = Self;
 
@@ -97,6 +123,18 @@ impl<T: Div<Output = T> + num::Float> Div for Vec2D<T> {
         Self {
             x: self.x / other.x,
             y: self.y / other.y,
+        }
+    }
+}
+
+// Vector by scalar division
+impl<T: Div<Output = T> + num::Float> Div<T> for Vec2D<T> {
+    type Output = Self;
+
+    fn div(self, other: T) -> Self::Output {
+        Self {
+            x: self.x / other,
+            y: self.y / other,
         }
     }
 }

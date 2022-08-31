@@ -1,22 +1,83 @@
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
 use std::collections::HashMap;
-use std::f64::consts::SQRT_2;
 use std::fmt;
+use std::time::Instant;
 
+pub mod agent;
 pub mod geometry;
+use crate::agent::{Agent, ContactGraph, Status, Task};
 use crate::geometry::Vec2D;
+
+/// Representation of time within the simulation. `abs_time` is a variation on
+/// epoch time, which is the number of seconds since the simulation began.
+/// `day_time` is similar, but reset every day. `day_of_week` is an integer
+/// representing which day of the week it is, starting with Sunday as 0.
+struct Time {
+    day_of_week: i64,
+    abs_time: i64,
+    day_time: i64,
+}
+
+impl Time {
+    pub fn new() -> Self {
+        Self {
+            day_of_week: 0,
+            abs_time: 0,
+            day_time: 0,
+        }
+    }
+
+    pub fn advance(&mut self, seconds: i64) {
+        self.abs_time += seconds;
+        self.day_time += seconds;
+
+        if self.day_time >= 86400 {
+            self.day_time -= 86400;
+            self.day_of_week += 1;
+            if self.day_of_week >= 7 {
+                self.day_of_week = 0;
+            }
+        }
+    }
+}
+
+pub enum Structure {
+    Home(Vec2D<f64>),
+    Workplace(Vec2D<f64>),
+    School(Vec2D<f64>),
+}
+
+impl TryFrom<(&str, Vec2D<f64>)> for Structure {
+    type Error = String;
+
+    fn try_from(item: (&str, Vec2D<f64>)) -> Result<Self, Self::Error> {
+        match item.0 {
+            "home" => Ok(Structure::Home(item.1)),
+            "workplace" => Ok(Structure::Workplace(item.1)),
+            "school" => Ok(Structure::School(item.1)),
+            _ => Err(format!("Invalid structure: {}", item.0)),
+        }
+    }
+}
 
 /// World is the wrapper for all simulation, with this struct being responsible
 /// for managing all of the agents and anything else that can happen within the
 /// simulation.
 pub struct World<R: Rng> {
     agents: Vec<Agent>,
+    /// curr_step measures simulation steps independent of time.
     curr_step: i64,
+    /// step_size is the number of seconds between each simulation step.
+    pub step_size: i64,
     size: Vec2D<f64>,
     infected: i64,
     rng: Box<R>,
     pub contacts: ContactGraph,
+    homes: Vec<Vec2D<f64>>,
+    workplaces: Vec<Vec2D<f64>>,
+    time: Time,
+    structures: HashMap<&'static str, Vec<Structure>>,
 }
 
 impl World<rand::prelude::ThreadRng> {
@@ -24,10 +85,15 @@ impl World<rand::prelude::ThreadRng> {
         World {
             agents: Vec::new(),
             curr_step: 0,
+            step_size: 1,
             size: size,
             infected: 0,
             rng: Box::new(rand::thread_rng()),
             contacts: ContactGraph::new(),
+            homes: Vec::new(),
+            workplaces: Vec::new(),
+            time: Time::new(),
+            structures: World::<rand::prelude::ThreadRng>::new_structure_map(),
         }
     }
 
@@ -35,10 +101,15 @@ impl World<rand::prelude::ThreadRng> {
         World {
             agents: agents,
             curr_step: 0,
+            step_size: 1,
             size: size,
             infected: 0,
             rng: Box::new(rand::thread_rng()),
             contacts: ContactGraph::new(),
+            homes: Vec::new(),
+            workplaces: Vec::new(),
+            time: Time::new(),
+            structures: World::<rand::prelude::ThreadRng>::new_structure_map(),
         }
     }
 }
@@ -58,7 +129,9 @@ where
             }
         }
     }
+
     pub fn step(&mut self) {
+        let now = Instant::now();
         for i in 0..self.agents.len() {
             for j in i + 1..self.agents.len() {
                 if self.agents[i].pos.dist(self.agents[j].pos) < 2.0 {
@@ -74,25 +147,71 @@ where
         }
 
         for agent in self.agents.iter_mut() {
-            agent.step();
+            agent.step(self.step_size, &mut self.rng);
         }
 
-        self.move_agents_random(1.0);
+        self.move_agents();
 
         self.curr_step += 1;
+        self.time.advance(self.step_size);
+        let step_duration = now.elapsed().as_millis();
+        if step_duration >= 100 {
+            self.step_size /= 2;
+        } else if step_duration < 10 {
+            self.step_size *= 2;
+        }
+    }
+
+    fn move_agents(&mut self) {
+        let distro = Uniform::from(0.0..1.0);
+        for agent in self.agents.iter_mut() {
+            if agent.status.is_dead() {
+                continue;
+            }
+
+            let dest = match agent.task {
+                Task::Home => agent.home,
+                Task::Work => agent.workplace,
+                Task::None => agent.home,
+                Task::School => agent.school,
+            };
+
+            let dir = dest - agent.pos;
+
+            if dir.mag() < 1e-6 {
+                agent.task = match agent.task {
+                    Task::Home => Task::Work,
+                    Task::Work => Task::Home,
+                    Task::None => Task::None,
+                    Task::School => Task::Home,
+                };
+                continue;
+            }
+
+            let movement = (dir.normalize()
+                * distro.sample(&mut self.rng)
+                * agent.speed
+                * self.step_size as f64)
+                .clamp_mag(dir.mag());
+            agent.pos += movement;
+        }
     }
 
     /// Apply a random movement to each of the agents with a magnitude in the
     /// range of [0, max_mag). World boundaries are handled by clipping
     /// position, not by wrapping.
+    #[allow(dead_code)]
     fn move_agents_random(&mut self, max_mag: f64) {
         let distro = Uniform::from(-1.0..1.0);
         for agent in self.agents.iter_mut() {
+            if agent.status.is_dead() {
+                continue;
+            }
+
             // generate a movement vector with components in the range of [-1, 1)
-            let movement = (distro.sample(&mut self.rng), distro.sample(&mut self.rng));
+            let movement = Vec2D::new(distro.sample(&mut self.rng), distro.sample(&mut self.rng));
             // scale the movement based on maximum magnitude and update position
-            agent.pos.x += movement.0 * max_mag / SQRT_2;
-            agent.pos.y += movement.1 * max_mag / SQRT_2;
+            agent.pos += movement.normalize() * max_mag;
             // clamp position to world size
             agent.pos.x = agent.pos.x.clamp(0.0, self.size.x);
             agent.pos.y = agent.pos.y.clamp(0.0, self.size.y);
@@ -104,12 +223,80 @@ where
             && self.agents.get(src_agent_id)?.status.is_infectious()
         {
             self.agents.get_mut(recip_agent_id)?.status = Status::Exposed(0);
-            self.agents.get_mut(recip_agent_id)?.src = src_agent_id;
             self.contacts.add_node(recip_agent_id, Some(src_agent_id));
             Some(true)
         } else {
             Some(false)
         }
+    }
+
+    pub fn place_homes_and_workplaces(&mut self, homes: usize, workplaces: usize) {
+        let x_distro = Uniform::from(0.0..self.size.x);
+        let y_distro = Uniform::from(0.0..self.size.y);
+        for _ in 0..homes {
+            self.homes.push(Vec2D::new(
+                x_distro.sample(&mut self.rng),
+                y_distro.sample(&mut self.rng),
+            ));
+        }
+        for _ in 0..workplaces {
+            self.workplaces.push(Vec2D::new(
+                x_distro.sample(&mut self.rng),
+                y_distro.sample(&mut self.rng),
+            ));
+        }
+    }
+
+    // TODO(tslnc04): convert the whole hashmap setup to use enum variants and
+    // then separate the data for each kind of structure. using strings when
+    // it's just going into an enum doesn't make sense
+    pub fn place_structures(&mut self, counts: HashMap<&'static str, usize>) -> Result<(), String> {
+        let x_distro = Uniform::from(0.0..self.size.x);
+        let y_distro = Uniform::from(0.0..self.size.y);
+
+        for (structure, count) in counts.iter() {
+            if !self.structures.contains_key(structure) {
+                self.structures.insert(*structure, Vec::new());
+            }
+
+            if let Some(structure_vec) = self.structures.get_mut(structure) {
+                for _ in 0..*count {
+                    structure_vec.push(Structure::try_from((
+                        *structure,
+                        Vec2D::new(
+                            x_distro.sample(&mut self.rng),
+                            y_distro.sample(&mut self.rng),
+                        ),
+                    ))?);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn assign_homes_and_workplaces(&mut self) {
+        let homes_distro = Uniform::from(0..self.homes.len());
+        let workplaces_distro = Uniform::from(0..self.workplaces.len());
+        for agent in self.agents.iter_mut() {
+            agent.home = self.homes[homes_distro.sample(&mut self.rng)];
+            agent.workplace = self.workplaces[workplaces_distro.sample(&mut self.rng)];
+        }
+    }
+
+    // TODO(tslnc04): randomly assign structures to agents, take into account
+    // age and changing behavior since schools shouldn't go to older agents and
+    // workplaces not to young agents
+    pub fn assign_structures(&mut self) {
+        return;
+    }
+
+    fn new_structure_map() -> HashMap<&'static str, Vec<Structure>> {
+        HashMap::from([
+            ("home", Vec::new()),
+            ("workplace", Vec::new()),
+            ("school", Vec::new()),
+        ])
     }
 }
 
@@ -138,17 +325,53 @@ where
     R: Rng,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut dead: i64 = 0;
+        for agent in self.agents.iter() {
+            if agent.status.is_dead() {
+                dead += 1;
+            }
+        }
         // since spatial storing of agents hasn't been implemented yet, each
         // grid square is an O(1) operation that only takes the first agent at a
         // given grid square. this could be problematic
         writeln!(
             f,
-            "----- Time {:2}; Infected {} -----",
-            self.curr_step, self.infected
+            "----- Time {:2} {}; Infected {}/{}; Dead {} -----",
+            self.curr_step,
+            self.step_size,
+            self.infected,
+            self.agents.len(),
+            dead,
         )?;
 
         for i in 0..self.size.x.ceil() as i64 {
             for j in 0..self.size.y.ceil() as i64 {
+                let mut object_found = false;
+                for home in self.homes.iter() {
+                    if home.x.round() as i64 == i && home.y.round() as i64 == j {
+                        write!(f, " H ")?;
+                        object_found = true;
+                        break;
+                    }
+                }
+
+                if object_found {
+                    continue;
+                }
+
+                object_found = false;
+                for workplace in self.workplaces.iter() {
+                    if workplace.x.round() as i64 == i && workplace.y.round() as i64 == j {
+                        write!(f, " W ")?;
+                        object_found = true;
+                        break;
+                    }
+                }
+
+                if object_found {
+                    continue;
+                }
+
                 let mut agent_found = false;
                 for agent in self.agents.iter() {
                     if agent.pos.x.round() as i64 == i && agent.pos.y.round() as i64 == j {
@@ -170,186 +393,9 @@ where
     }
 }
 
-/// Represents the status of each agent.
-#[derive(Debug)]
-pub enum Status {
-    Susceptible,
-    /// Exposed contains an integer representing the length of time since the
-    /// agent was exposed. Only after a certain length of time being exposed
-    /// will the agent become infectious.
-    Exposed(i64),
-    /// Infectious contains an integer that tells how long the agent has been
-    /// infectious for. This is used to determine when they should transition
-    /// into being recovered.
-    Infectious(i64),
-    Recovered,
-}
-
-impl Status {
-    pub fn is_infectious(&self) -> bool {
-        matches!(self, Status::Infectious(_))
-    }
-
-    pub fn is_susceptible(&self) -> bool {
-        matches!(self, Status::Susceptible)
-    }
-}
-
-/// Each agent is a distinct entity that gets simulated. It currently only uses
-/// the position and the status to determine infection and recovery.
-#[derive(Debug)]
-pub struct Agent {
-    pub pos: Vec2D<f64>,
-    pub status: Status,
-    /// src is the ID of the agent that infected this agent. Since it defaults
-    /// to 0, one should check the status before assuming that this agent has
-    /// been infected by src.
-    src: usize,
-}
-
-impl Agent {
-    pub fn new(pos: Vec2D<f64>) -> Self {
-        Agent {
-            pos: pos,
-            status: Status::Susceptible,
-            src: 0,
-        }
-    }
-
-    /// Attempts to infect the agent, returns true only when the agent was
-    /// susceptible and sucessfully infected.
-    /// Deprecated in favor of control from the World struct
-    pub fn infect(&mut self) -> bool {
-        if let Status::Susceptible = self.status {
-            self.status = Status::Exposed(0);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn step(&mut self) {
-        match self.status {
-            Status::Exposed(t) => {
-                if t > 2 {
-                    self.status = Status::Infectious(0);
-                } else {
-                    self.status = Status::Exposed(t + 1);
-                }
-            }
-            Status::Infectious(t) => {
-                if t > 6 {
-                    self.status = Status::Recovered;
-                } else {
-                    self.status = Status::Infectious(t + 1);
-                }
-            }
-            _ => (),
-        }
-    }
-}
-
-impl fmt::Display for Agent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.status {
-            Status::Susceptible => write!(f, "{} S {}", GREEN, RESET),
-            Status::Exposed(t) => write!(f, "{}E{} {}", ORANGE, t, RESET),
-            Status::Infectious(t) => write!(f, "{}I{} {}", RED, t, RESET),
-            Status::Recovered => write!(f, "{} R {}", YELLOW, RESET),
-        }
-    }
-}
-
-// TODO(tslnc04): implement the graph
-// build the graph during the simulation and use that to replace the src field
-// of the agent struct
-#[derive(Debug)]
-pub struct ContactGraph {
-    nodes: Vec<ContactNode>,
-    // root really just represents the index case
-    root: usize,
-    /// agent_table provides a lookup between agent ids (keys) and nodes indices (values)
-    agent_table: HashMap<usize, usize>,
-}
-
-impl ContactGraph {
-    pub fn new() -> Self {
-        Self {
-            nodes: Vec::new(),
-            root: 0,
-            agent_table: HashMap::new(),
-        }
-    }
-
-    pub fn add_node(&mut self, agent_id: usize, parent: Option<usize>) {
-        // TODO(tslnc04): refactor this, it cannot be this ugly
-        // consider making parent not an option since only the root shouldn't
-        // have a parent
-        let graph_parent = match parent {
-            Some(parent_agent) => match self.agent_table.get(&parent_agent) {
-                Some(parent_index) => Some(*parent_index),
-                None => None,
-            },
-            None => None,
-        };
-        let new_node = ContactNode {
-            index: self.nodes.len(),
-            parent: graph_parent,
-            children: Vec::new(),
-            agent_id: agent_id,
-        };
-
-        // TODO(tslnc04): add a function for setting the root
-        if graph_parent.is_none() {
-            self.root = self.nodes.len();
-        } else if let Some(parent_node) = self.nodes.get_mut(graph_parent.unwrap()) {
-            parent_node.children.push(new_node.index);
-        }
-
-        self.agent_table.insert(agent_id, self.nodes.len());
-        self.nodes.push(new_node);
-    }
-}
-
-impl fmt::Display for ContactGraph {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "digraph ContactGraph {{")?;
-        for node in self.nodes.iter() {
-            write!(f, "{}", node);
-        }
-        write!(f, "}}");
-        Ok(())
-    }
-}
-
-/// Each ContactNode stores the place of an agent in the contact-tracing graph.
-/// The parent is the source of the infection and the children are all the agents
-/// infected by this node's agent.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct ContactNode {
-    index: usize,
-    parent: Option<usize>,
-    children: Vec<usize>,
-    agent_id: usize,
-}
-
-impl fmt::Display for ContactNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ContactNode{}[label=\"Agent {}\"];",
-            self.index, self.agent_id
-        )?;
-        for child in self.children.iter() {
-            write!(f, "ContactNode{} -> ContactNode{};", self.index, child)?;
-        }
-        Ok(())
-    }
-}
-
 const RED: &str = "\x1b[0;31m";
 const ORANGE: &str = "\x1b[1;31m";
 const YELLOW: &str = "\x1b[0;33m";
 const GREEN: &str = "\x1b[0;32m";
 const RESET: &str = "\x1b[0m";
+const BLUE: &str = "\x1b[0;34m";
