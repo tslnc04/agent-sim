@@ -11,5 +11,6 @@
 - [X] display with colors
 - [-] refactor `lib.rs` into multiple files
 - [ ] handle agent lifecycle (necessary for implementing work/home/school properly)
-- [ ] implement schools, refactor so that there is an array of all special
+- [X] implement schools, refactor so that there is an array of all special
   places rather than separate vectors for each type of building
+- [ ] maybe make a config so that fewer things are hardcoded

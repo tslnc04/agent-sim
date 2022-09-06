@@ -7,6 +7,7 @@ pub struct Vec2D<T: num::Float> {
     pub y: T,
 }
 
+// TODO(tslnc04): allow for integer vectors
 impl<T: num::Float> Vec2D<T> {
     pub fn new(x: T, y: T) -> Self {
         Self { x: x, y: y }
@@ -19,9 +20,10 @@ impl<T: num::Float> Vec2D<T> {
         }
     }
 
-    pub fn new_random<D, R>(x_distro: D, y_distro: D, rng: &mut R) -> Self
+    pub fn new_random<Dx, Dy, R>(x_distro: Dx, y_distro: Dy, rng: &mut R) -> Self
     where
-        D: rand::distributions::Distribution<T>,
+        Dx: rand::distributions::Distribution<T>,
+        Dy: rand::distributions::Distribution<T>,
         R: rand::Rng,
     {
         Self {
@@ -57,6 +59,35 @@ impl<T: num::Float> Vec2D<T> {
         } else {
             *self
         }
+    }
+
+    pub fn is_in_bounds(&self, pos: Self, dim: Self) -> bool {
+        self.x >= pos.x && self.x <= pos.x + dim.x && self.y >= pos.y && self.y <= pos.y + dim.y
+    }
+
+    /// Finds which quadrant of the rectangular bounds the vector is in.
+    /// Quadrants are numbered by the following system:
+    /// +---+---+
+    /// | 0 | 1 |
+    /// +---+---+
+    /// | 2 | 3 |
+    /// +---+---+
+    /// (0,0) => 2
+    /// (0,1) => 0
+    /// (1,0) => 3
+    /// (1,1) => 1
+    pub fn get_bounds_quadrant(&self, pos: Self, dim: Self) -> usize {
+        let x = if self.x < pos.x + dim.x / T::from(2.0).unwrap() {
+            0
+        } else {
+            1
+        };
+        let y = if self.y < pos.y + dim.y / T::from(2.0).unwrap() {
+            0
+        } else {
+            1
+        };
+        2 - 2 * y + x
     }
 }
 

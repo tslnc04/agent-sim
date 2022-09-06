@@ -55,7 +55,7 @@ pub struct Agent {
     pub status: Status,
     pub task: Task,
     pub home: Vec2D<f64>,
-    pub workplace: Vec2D<f64>,
+    pub work: Vec2D<f64>,
     pub school: Vec2D<f64>,
     /// speed is the distance the agent can move per second, regardless of the
     /// size of the simulation step.
@@ -72,7 +72,7 @@ impl Agent {
             status: Status::Susceptible,
             task: Task::Home,
             home: Vec2D::new_nan(),
-            workplace: Vec2D::new_nan(),
+            work: Vec2D::new_nan(),
             school: Vec2D::new_nan(),
             speed: speed,
             age: 0,
@@ -197,7 +197,7 @@ impl ContactGraph {
 
     pub fn get_average_degree(&self) -> f64 {
         let mut total_degree = 0;
-        for node in &self.nodes {
+        for node in self.nodes.iter() {
             total_degree += node.get_degree();
         }
         total_degree as f64 / self.nodes.len() as f64

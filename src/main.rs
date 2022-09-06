@@ -1,4 +1,4 @@
-use agent_sim::{agent::Agent, geometry::Vec2D, World};
+use agent_sim::{agent::Agent, geometry::Vec2D, StructureType, World};
 use rand::Rng;
 // use std::fs;
 // use std::process::Command;
@@ -25,15 +25,13 @@ fn main() {
     let mut world = World::new_with_agents(Vec2D::new(50.0, 50.0), agents);
     world.step_size = 86400;
     world.infect_index_case();
-    world.place_homes_and_workplaces(4, 2);
     world
         .place_structures(HashMap::from([
-            ("home", 4),
-            ("workplace", 2),
-            ("school", 1),
+            (StructureType::Home, 4),
+            (StructureType::Work, 2),
+            (StructureType::School, 1),
         ]))
         .unwrap();
-    world.assign_homes_and_workplaces();
     world.assign_structures();
 
     println!("{}{}", CLEAR, world);

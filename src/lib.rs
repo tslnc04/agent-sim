@@ -42,21 +42,39 @@ impl Time {
     }
 }
 
-pub enum Structure {
-    Home(Vec2D<f64>),
-    Workplace(Vec2D<f64>),
-    School(Vec2D<f64>),
+#[derive(Eq, Hash, PartialEq, Debug, Copy, Clone)]
+pub enum StructureType {
+    Home,
+    Work,
+    School,
 }
 
-impl TryFrom<(&str, Vec2D<f64>)> for Structure {
-    type Error = String;
+impl fmt::Display for StructureType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            StructureType::Home => write!(f, "H"),
+            StructureType::Work => write!(f, "W"),
+            StructureType::School => write!(f, "S"),
+        }
+    }
+}
 
-    fn try_from(item: (&str, Vec2D<f64>)) -> Result<Self, Self::Error> {
-        match item.0 {
-            "home" => Ok(Structure::Home(item.1)),
-            "workplace" => Ok(Structure::Workplace(item.1)),
-            "school" => Ok(Structure::School(item.1)),
-            _ => Err(format!("Invalid structure: {}", item.0)),
+pub struct Structure {
+    pub typ: StructureType,
+    pub pos: Vec2D<f64>,
+    pub capacity: i64,
+}
+
+impl Structure {
+    pub fn new(typ: StructureType, pos: Vec2D<f64>, capacity: i64) -> Self {
+        Self { typ, pos, capacity }
+    }
+
+    pub fn new_without_capacity(typ: StructureType, pos: Vec2D<f64>) -> Self {
+        Self {
+            typ,
+            pos,
+            capacity: 0,
         }
     }
 }
@@ -74,10 +92,8 @@ pub struct World<R: Rng> {
     infected: i64,
     rng: Box<R>,
     pub contacts: ContactGraph,
-    homes: Vec<Vec2D<f64>>,
-    workplaces: Vec<Vec2D<f64>>,
     time: Time,
-    structures: HashMap<&'static str, Vec<Structure>>,
+    structures: HashMap<StructureType, Vec<Structure>>,
 }
 
 impl World<rand::prelude::ThreadRng> {
@@ -90,10 +106,8 @@ impl World<rand::prelude::ThreadRng> {
             infected: 0,
             rng: Box::new(rand::thread_rng()),
             contacts: ContactGraph::new(),
-            homes: Vec::new(),
-            workplaces: Vec::new(),
             time: Time::new(),
-            structures: World::<rand::prelude::ThreadRng>::new_structure_map(),
+            structures: HashMap::new(),
         }
     }
 
@@ -106,10 +120,8 @@ impl World<rand::prelude::ThreadRng> {
             infected: 0,
             rng: Box::new(rand::thread_rng()),
             contacts: ContactGraph::new(),
-            homes: Vec::new(),
-            workplaces: Vec::new(),
             time: Time::new(),
-            structures: World::<rand::prelude::ThreadRng>::new_structure_map(),
+            structures: HashMap::new(),
         }
     }
 }
@@ -153,6 +165,11 @@ where
         self.move_agents();
 
         self.curr_step += 1;
+
+        // TODO(tslnc04): i'm pretty sure this is backwards. if the goal is to
+        // keep the ratio between simulation time and real time constant, the
+        // step size should increase when the simulation is running slowly
+        // but like also this is kinda unnecessary for now, ig that's why it's a todo
         self.time.advance(self.step_size);
         let step_duration = now.elapsed().as_millis();
         if step_duration >= 100 {
@@ -171,7 +188,7 @@ where
 
             let dest = match agent.task {
                 Task::Home => agent.home,
-                Task::Work => agent.workplace,
+                Task::Work => agent.work,
                 Task::None => agent.home,
                 Task::School => agent.school,
             };
@@ -230,27 +247,10 @@ where
         }
     }
 
-    pub fn place_homes_and_workplaces(&mut self, homes: usize, workplaces: usize) {
-        let x_distro = Uniform::from(0.0..self.size.x);
-        let y_distro = Uniform::from(0.0..self.size.y);
-        for _ in 0..homes {
-            self.homes.push(Vec2D::new(
-                x_distro.sample(&mut self.rng),
-                y_distro.sample(&mut self.rng),
-            ));
-        }
-        for _ in 0..workplaces {
-            self.workplaces.push(Vec2D::new(
-                x_distro.sample(&mut self.rng),
-                y_distro.sample(&mut self.rng),
-            ));
-        }
-    }
-
-    // TODO(tslnc04): convert the whole hashmap setup to use enum variants and
-    // then separate the data for each kind of structure. using strings when
-    // it's just going into an enum doesn't make sense
-    pub fn place_structures(&mut self, counts: HashMap<&'static str, usize>) -> Result<(), String> {
+    pub fn place_structures(
+        &mut self,
+        counts: HashMap<StructureType, usize>,
+    ) -> Result<(), String> {
         let x_distro = Uniform::from(0.0..self.size.x);
         let y_distro = Uniform::from(0.0..self.size.y);
 
@@ -261,13 +261,13 @@ where
 
             if let Some(structure_vec) = self.structures.get_mut(structure) {
                 for _ in 0..*count {
-                    structure_vec.push(Structure::try_from((
+                    structure_vec.push(Structure::new_without_capacity(
                         *structure,
                         Vec2D::new(
                             x_distro.sample(&mut self.rng),
                             y_distro.sample(&mut self.rng),
                         ),
-                    ))?);
+                    ));
                 }
             }
         }
@@ -275,27 +275,39 @@ where
         Ok(())
     }
 
-    pub fn assign_homes_and_workplaces(&mut self) {
-        let homes_distro = Uniform::from(0..self.homes.len());
-        let workplaces_distro = Uniform::from(0..self.workplaces.len());
-        for agent in self.agents.iter_mut() {
-            agent.home = self.homes[homes_distro.sample(&mut self.rng)];
-            agent.workplace = self.workplaces[workplaces_distro.sample(&mut self.rng)];
-        }
-    }
-
     // TODO(tslnc04): randomly assign structures to agents, take into account
     // age and changing behavior since schools shouldn't go to older agents and
     // workplaces not to young agents
     pub fn assign_structures(&mut self) {
-        return;
+        if let Some(home_structures) = self.structures.get(&StructureType::Home) {
+            let homes_distro = Uniform::from(0..home_structures.len());
+            for agent in self.agents.iter_mut() {
+                agent.home = home_structures[homes_distro.sample(&mut self.rng)].pos;
+            }
+        }
+
+        if let Some(work_structures) = self.structures.get(&StructureType::Work) {
+            let work_distro = Uniform::from(0..work_structures.len());
+            for agent in self.agents.iter_mut() {
+                agent.work = work_structures[work_distro.sample(&mut self.rng)].pos;
+            }
+        }
+
+        if let Some(school_structures) = self.structures.get(&StructureType::School) {
+            let schools_distro = Uniform::from(0..school_structures.len());
+            for agent in self.agents.iter_mut() {
+                agent.school = school_structures[schools_distro.sample(&mut self.rng)].pos;
+            }
+        }
     }
 
-    fn new_structure_map() -> HashMap<&'static str, Vec<Structure>> {
+    // TODO(tslnc04): determine whether this function is worth keeping
+    #[allow(dead_code)]
+    fn new_structure_map() -> HashMap<StructureType, Vec<Structure>> {
         HashMap::from([
-            ("home", Vec::new()),
-            ("workplace", Vec::new()),
-            ("school", Vec::new()),
+            (StructureType::Home, Vec::new()),
+            (StructureType::Work, Vec::new()),
+            (StructureType::School, Vec::new()),
         ])
     }
 }
@@ -346,29 +358,20 @@ where
 
         for i in 0..self.size.x.ceil() as i64 {
             for j in 0..self.size.y.ceil() as i64 {
-                let mut object_found = false;
-                for home in self.homes.iter() {
-                    if home.x.round() as i64 == i && home.y.round() as i64 == j {
-                        write!(f, " H ")?;
-                        object_found = true;
-                        break;
+                let mut structure_found = false;
+                for (structure_type, structures) in self.structures.iter() {
+                    for structure in structures.iter() {
+                        if structure.pos.x.floor() as i64 == i
+                            && structure.pos.y.floor() as i64 == j
+                        {
+                            write!(f, " {} ", structure_type)?;
+                            structure_found = true;
+                            break;
+                        }
                     }
                 }
 
-                if object_found {
-                    continue;
-                }
-
-                object_found = false;
-                for workplace in self.workplaces.iter() {
-                    if workplace.x.round() as i64 == i && workplace.y.round() as i64 == j {
-                        write!(f, " W ")?;
-                        object_found = true;
-                        break;
-                    }
-                }
-
-                if object_found {
+                if structure_found {
                     continue;
                 }
 
@@ -390,6 +393,178 @@ where
         }
 
         Ok(())
+    }
+}
+
+pub struct Quadtree {
+    pos: Vec2D<f64>,
+    dim: Vec2D<f64>,
+    leaf_capacity: usize,
+    next_id: usize,
+    pub nodes: HashMap<usize, QuadtreeNode>,
+}
+
+impl Quadtree {
+    pub fn new(pos: Vec2D<f64>, dim: Vec2D<f64>) -> Self {
+        let mut new_quadtree = Self {
+            pos,
+            dim,
+            leaf_capacity: 4,
+            next_id: 0,
+            nodes: HashMap::new(),
+        };
+
+        new_quadtree.add_node(QuadtreeNode::Leaf(QuadtreeLeaf::new(pos, dim)));
+
+        new_quadtree
+    }
+
+    pub fn get(&self, id: usize) -> Option<&QuadtreeNode> {
+        self.nodes.get(&id)
+    }
+
+    pub fn get_leaf(&self, id: usize) -> Option<&QuadtreeLeaf> {
+        if let Some(QuadtreeNode::Leaf(leaf)) = self.get(id) {
+            Some(leaf)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut QuadtreeNode> {
+        self.nodes.get_mut(&id)
+    }
+
+    pub fn get_leaf_mut(&mut self, id: usize) -> Option<&mut QuadtreeLeaf> {
+        if let Some(QuadtreeNode::Leaf(leaf)) = self.get_mut(id) {
+            Some(leaf)
+        } else {
+            None
+        }
+    }
+
+    fn add_node(&mut self, node: QuadtreeNode) -> usize {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.nodes.insert(id, node);
+        id
+    }
+
+    pub fn get_node_for_pos(&self, pos: Vec2D<f64>) -> Option<usize> {
+        let mut curr = 0;
+
+        loop {
+            if let Some(curr_node) = self.get(curr) {
+                if !curr_node.contains(pos) {
+                    return None;
+                }
+
+                match curr_node {
+                    QuadtreeNode::Leaf(_) => return Some(curr),
+                    QuadtreeNode::Root(root) => curr = pos.get_bounds_quadrant(root.pos, root.dim),
+                }
+            } else {
+                return None;
+            }
+        }
+    }
+
+    pub fn add_agent(&mut self, agent: Agent) -> Option<usize> {
+        if let Some(node_id) = self.get_node_for_pos(agent.pos) {
+            if let Some(node) = self.get_leaf_mut(node_id) {
+                node.agents.push(agent);
+                self.check_capacity(node_id);
+                return Some(node_id);
+            }
+        }
+
+        None
+    }
+
+    fn check_capacity(&mut self, id: usize) {
+        if let Some(node) = self.get_leaf_mut(id) {
+            if node.agents.len() > self.leaf_capacity {
+                self.split(id);
+            }
+        }
+    }
+
+    fn split(&mut self, id: usize) {
+        let mut children = Vec::new();
+
+        for y in 0..=1 {
+            for x in 0..=1 {
+                if let Some(node) = self.get_leaf_mut(id) {
+                    let mut new_leaf = QuadtreeLeaf::new(
+                        node.pos + Vec2D::new(x as f64, 1.0 - y as f64) * node.dim / 2.0,
+                        node.dim / 2.0,
+                    );
+                    // preferred implementation if drain filter were stabilized
+                    // new_leaf.agents = node
+                    //     .agents
+                    //     .drain_filter(|agent| agent.pos.is_in_bounds(new_leaf.pos, new_leaf.dim))
+                    //     .collect();
+                    let mut i = 0;
+                    while i < node.agents.len() {
+                        if node.agents[i].pos.is_in_bounds(new_leaf.pos, new_leaf.dim) {
+                            new_leaf.agents.push(node.agents.swap_remove(i));
+                        } else {
+                            i += 1;
+                        }
+                    }
+
+                    children.push(self.add_node(QuadtreeNode::Leaf(new_leaf)));
+                }
+            }
+        }
+
+        if let Some(node) = self.get_leaf(id) {
+            let new_root = QuadtreeNode::Root(QuadtreeRoot::new(node.pos, node.dim, children));
+
+            self.nodes.insert(id, new_root);
+        }
+    }
+}
+
+pub enum QuadtreeNode {
+    Root(QuadtreeRoot),
+    Leaf(QuadtreeLeaf),
+}
+
+impl QuadtreeNode {
+    pub fn contains(&self, pos: Vec2D<f64>) -> bool {
+        match self {
+            QuadtreeNode::Root(root) => pos.is_in_bounds(root.pos, root.dim),
+            QuadtreeNode::Leaf(leaf) => pos.is_in_bounds(leaf.pos, leaf.dim),
+        }
+    }
+}
+
+pub struct QuadtreeRoot {
+    pub pos: Vec2D<f64>,
+    pub dim: Vec2D<f64>,
+    pub children: Vec<usize>,
+}
+
+impl QuadtreeRoot {
+    pub fn new(pos: Vec2D<f64>, dim: Vec2D<f64>, children: Vec<usize>) -> Self {
+        Self { pos, dim, children }
+    }
+}
+
+pub struct QuadtreeLeaf {
+    pub pos: Vec2D<f64>,
+    pub dim: Vec2D<f64>,
+    pub agents: Vec<Agent>,
+}
+
+impl QuadtreeLeaf {
+    pub fn new(pos: Vec2D<f64>, dim: Vec2D<f64>) -> Self {
+        Self {
+            pos,
+            dim,
+            agents: Vec::new(),
+        }
     }
 }
 
