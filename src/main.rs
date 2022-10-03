@@ -13,7 +13,7 @@ fn main() {
 
     for i in 0..50 {
         for j in 0..50 {
-            if rng.gen_bool(0.4) {
+            if rng.gen_bool(0.6) {
                 agents.push(Agent::new(
                     Vec2D::new(i as f64, j as f64),
                     (rng.gen::<f64>() + 0.5) * 3.0 / 86400.0,
@@ -35,7 +35,7 @@ fn main() {
     world.assign_structures();
 
     println!("{}{}", CLEAR, world);
-    for step in 0..101 {
+    for step in 0..151 {
         world.step();
 
         if step % 10 == 0 {

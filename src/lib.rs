@@ -415,8 +415,9 @@ pub struct Quadtree {
     leaf_capacity: usize,
     next_node_id: usize,
     next_agent_id: usize,
-    nodes: HashMap<usize, QuadtreeNode>,
+    nodes: Vec<QuadtreeNode>,
     agents: HashMap<usize, Agent>,
+    open_node_indices: Vec<usize>,
     agent_to_node: HashMap<usize, usize>,
 }
 
@@ -427,8 +428,9 @@ impl Quadtree {
             leaf_capacity: 4,
             next_node_id: 0,
             next_agent_id: 0,
-            nodes: HashMap::new(),
+            nodes: Vec::new(),
             agents: HashMap::new(),
+            open_node_indices: Vec::new(),
             agent_to_node: HashMap::new(),
         };
 
@@ -452,6 +454,13 @@ impl Quadtree {
         self.agents.values()
     }
 
+    fn iter_nodes(&self) -> impl Iterator<Item = &QuadtreeNode> {
+        let open_node_indices = HashSet::<_>::from_iter(self.open_node_indices.iter());
+        (0..self.nodes.len())
+            .filter(move |i| !open_node_indices.contains(i))
+            .map(|i| &self.nodes[i])
+    }
+
     /// Returns a mutable iterator over the agents in an arbitrary order
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Agent> {
         self.agents.values_mut()
@@ -462,11 +471,11 @@ impl Quadtree {
     }
 
     fn get(&self, id: usize) -> Option<&QuadtreeNode> {
-        self.nodes.get(&id)
+        self.nodes.get(id)
     }
 
     fn get_leaf(&self, id: usize) -> Option<&QuadtreeLeaf> {
-        match self.nodes.get(&id) {
+        match self.nodes.get(id) {
             Some(QuadtreeNode::Leaf(leaf)) => Some(leaf),
             _ => None,
         }
@@ -477,11 +486,11 @@ impl Quadtree {
     }
 
     fn get_mut(&mut self, id: usize) -> Option<&mut QuadtreeNode> {
-        self.nodes.get_mut(&id)
+        self.nodes.get_mut(id)
     }
 
     fn get_leaf_mut(&mut self, id: usize) -> Option<&mut QuadtreeLeaf> {
-        match self.nodes.get_mut(&id) {
+        match self.nodes.get_mut(id) {
             Some(QuadtreeNode::Leaf(leaf)) => Some(leaf),
             _ => None,
         }
@@ -496,13 +505,27 @@ impl Quadtree {
         self.agents.keys().copied().collect()
     }
 
-    /// Adds the node to the quadtree, guaranteed to use self.next_node_id and
-    /// then increment it
+    /// Adds the node to the quadtree and returns the id of the node
     fn add_node(&mut self, node: QuadtreeNode) -> usize {
-        let id = self.next_node_id;
-        self.next_node_id += 1;
-        self.nodes.insert(id, node);
-        id
+        if self.open_node_indices.len() > 0 {
+            let id = self.open_node_indices.pop().unwrap();
+            self.nodes[id] = node;
+            id
+        } else {
+            self.nodes.push(node);
+            self.nodes.len() - 1
+        }
+    }
+
+    /// Removes the node from the quadtree. Due to how this functions
+    /// internally, the node is not actually removed and only overwritten when
+    /// the index is given to another node.
+    fn remove_node(&mut self, id: usize) {
+        if id == self.nodes.len() - 1 {
+            self.nodes.pop();
+        } else {
+            self.open_node_indices.push(id);
+        }
     }
 
     /// Guaranteed to return a leaf node
@@ -574,7 +597,7 @@ impl Quadtree {
 
     pub fn clean_tree(&mut self) {
         let mut leaf_parents = HashSet::new();
-        for leaf in self.nodes.values().filter(|node| node.is_leaf()) {
+        for leaf in self.iter_nodes().filter(|node| node.is_leaf()) {
             if let Some(parent) = leaf.get_parent() {
                 leaf_parents.insert(parent);
             }
@@ -615,8 +638,6 @@ impl Quadtree {
             let agent = self.get_agent(agent_id)?;
             let quadrant = node_bounds.get_quadrant(agent.pos);
             new_leaves[quadrant].agents.push(agent_id);
-            self.agent_to_node
-                .insert(agent_id, self.next_node_id + quadrant);
         }
 
         let children = new_leaves
@@ -624,14 +645,18 @@ impl Quadtree {
             .map(|leaf| self.add_node(QuadtreeNode::Leaf(leaf)))
             .collect::<Vec<_>>();
 
-        self.nodes.insert(
-            id,
-            QuadtreeNode::Root(QuadtreeRoot {
-                parent: node_parent,
-                bounds: node_bounds,
-                children,
-            }),
-        )?;
+        for child_id in children.iter() {
+            let agents = self.get_leaf(*child_id)?.agents.clone();
+            for agent_id in agents.iter() {
+                self.agent_to_node.insert(*agent_id, *child_id);
+            }
+        }
+
+        self.nodes[id] = QuadtreeNode::Root(QuadtreeRoot {
+            parent: node_parent,
+            bounds: node_bounds,
+            children,
+        });
 
         Some(())
     }
@@ -661,12 +686,12 @@ impl Quadtree {
         }
 
         for leaf_id in node_children.iter() {
-            self.nodes.remove(leaf_id);
+            self.remove_node(*leaf_id);
         }
 
         let mut new_leaf = QuadtreeLeaf::new(Some(id), node_bounds);
         new_leaf.agents = node_agents;
-        self.nodes.insert(id, QuadtreeNode::Leaf(new_leaf))?;
+        self.nodes[id] = QuadtreeNode::Leaf(new_leaf);
 
         Some(())
     }
@@ -679,19 +704,19 @@ impl Quadtree {
         while to_visit.len() > 0 {
             // unwrap since we know the vector isn't empty
             let curr = to_visit.pop().unwrap();
+            let curr_node = self.get(curr).unwrap();
 
-            match self.get(curr) {
-                Some(QuadtreeNode::Leaf(leaf)) => {
-                    if leaf.bounds.intersects(bounds) {
-                        leaves.push(curr);
-                    }
-                }
-                Some(QuadtreeNode::Root(root)) => {
+            if !curr_node.get_bounds().intersects(bounds) {
+                continue;
+            }
+
+            match curr_node {
+                QuadtreeNode::Leaf(_) => leaves.push(curr),
+                QuadtreeNode::Root(root) => {
                     for child in root.children.iter() {
                         to_visit.push(*child);
                     }
                 }
-                None => {}
             }
         }
 
@@ -735,7 +760,7 @@ impl Quadtree {
             ),
         );
 
-        for node in self.nodes.values() {
+        for node in self.iter_nodes() {
             let rect = svg::node::element::Rectangle::new()
                 .set("x", node.get_bounds().bl.x)
                 .set("y", node.get_bounds().bl.y)

@@ -18,4 +18,4 @@
 - [ ] remove unwraps and bubble errors
 - [X] fix time? somehow it overflows
 - [X] make movements get mirrored in the quadtree
-- [ ] make splitting and joining dynamic in the quadtree
+- [X] make splitting and joining dynamic in the quadtree
