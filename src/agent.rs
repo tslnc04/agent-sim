@@ -120,8 +120,11 @@ impl Agent {
     /// A flat increase of 0.1% per year is added for infectious agents.
     ///
     /// https://www.ssa.gov/oact/STATS/table4c6.html
+    // TODO(tslnc04): ensure that this function only returns values 0..1,
+    // otherwise the program panics
+    // like with something better than a clamp hopefully
     pub fn death_probability(&self, step_size: i64) -> f64 {
-        (match self.age / (365 * 86400) {
+        ((match self.age / (365 * 86400) {
             0..=20 => 0.001,
             21..=50 => 0.0001 * (self.age as f64 - 20.0) + 0.001,
             51..=80 => 0.0001 * (self.age as f64 - 50.0) + 0.005,
@@ -133,7 +136,8 @@ impl Agent {
         } else {
             0.0
         }) / (365.0 * 86400.0)
-            * step_size as f64
+            * step_size as f64)
+            .clamp(0.0, 1.0)
     }
 }
 

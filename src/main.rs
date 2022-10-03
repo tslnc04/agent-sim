@@ -35,7 +35,7 @@ fn main() {
     world.assign_structures();
 
     println!("{}{}", CLEAR, world);
-    for step in 0..500 {
+    for step in 0..101 {
         world.step();
 
         if step % 10 == 0 {
@@ -44,7 +44,8 @@ fn main() {
         }
     }
 
-    println!("Average degree: {}", world.contacts.get_average_degree());
+    // println!("Average degree: {}", world.contacts.get_average_degree());
+    // svg::save("quadtree.svg", &world.agents.render_as_svg()).unwrap();
 
     // fs::write("example.dot", world.contacts.to_string()).expect("file writing error");
     // Command::new("dot")

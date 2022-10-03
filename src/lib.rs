@@ -1,13 +1,13 @@
 use rand::distributions::{Distribution, Uniform};
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Instant;
 
 pub mod agent;
 pub mod geometry;
 use crate::agent::{Agent, ContactGraph, Status, Task};
-use crate::geometry::Vec2D;
+use crate::geometry::{Rect, Vec2D};
 
 /// Representation of time within the simulation. `abs_time` is a variation on
 /// epoch time, which is the number of seconds since the simulation began.
@@ -83,7 +83,7 @@ impl Structure {
 /// for managing all of the agents and anything else that can happen within the
 /// simulation.
 pub struct World<R: Rng> {
-    agents: Vec<Agent>,
+    pub agents: Quadtree,
     /// curr_step measures simulation steps independent of time.
     curr_step: i64,
     /// step_size is the number of seconds between each simulation step.
@@ -94,34 +94,37 @@ pub struct World<R: Rng> {
     pub contacts: ContactGraph,
     time: Time,
     structures: HashMap<StructureType, Vec<Structure>>,
+    pub last_step_duration: u128,
 }
 
 impl World<rand::prelude::ThreadRng> {
     pub fn new(size: Vec2D<f64>) -> Self {
         World {
-            agents: Vec::new(),
+            agents: Quadtree::new(Rect::new(Vec2D::new_zero(), size)),
             curr_step: 0,
             step_size: 1,
-            size: size,
+            size,
             infected: 0,
             rng: Box::new(rand::thread_rng()),
             contacts: ContactGraph::new(),
             time: Time::new(),
             structures: HashMap::new(),
+            last_step_duration: 0,
         }
     }
 
     pub fn new_with_agents(size: Vec2D<f64>, agents: Vec<Agent>) -> Self {
         World {
-            agents: agents,
+            agents: Quadtree::new_with_agents(Rect::new(Vec2D::new_zero(), size), agents),
             curr_step: 0,
             step_size: 1,
-            size: size,
+            size,
             infected: 0,
             rng: Box::new(rand::thread_rng()),
             contacts: ContactGraph::new(),
             time: Time::new(),
             structures: HashMap::new(),
+            last_step_duration: 0,
         }
     }
 }
@@ -132,27 +135,41 @@ where
 {
     /// Randomly infect an agent as the index case. Does not check if other
     /// agents are already infected
+    /// Is not actually random since the quadtree makes it hard.
+    // TODO(tslnc04): Make this actually random, and add it to the contact graph
     pub fn infect_index_case(&mut self) {
-        let index_agent_id = self.rng.gen_range(0..self.agents.len());
-        if let Some(index_agent) = self.agents.get_mut(index_agent_id) {
-            if index_agent.status.is_susceptible() {
-                index_agent.status = Status::Exposed(0);
-                self.contacts.add_node(index_agent_id, None);
-            }
+        if self.agents.len() == 0 {
+            return;
+        }
+
+        if let Some(agent) = self.agents.get_agent_mut(0) {
+            agent.status = Status::Exposed(0);
+            self.infected += 1;
         }
     }
 
     pub fn step(&mut self) {
         let now = Instant::now();
-        for i in 0..self.agents.len() {
-            for j in i + 1..self.agents.len() {
-                if self.agents[i].pos.dist(self.agents[j].pos) < 2.0 {
-                    // agent j attempts to infect agent i, if that fails agent i
-                    // attempts to infect agent j
-                    if let Some(true) = self.infect_agent(i, j) {
-                        self.infected += 1;
-                    } else if let Some(true) = self.infect_agent(j, i) {
-                        self.infected += 1;
+        for agent_id in self.agents.get_agent_ids() {
+            let agent = self.agents.get_agent(agent_id).unwrap();
+            if !agent.status.is_infectious() {
+                continue;
+            }
+
+            // setup a 2x2 bounding box centered around the agent
+            let bounds = Rect::new_centered(agent.pos, Vec2D::new_one() * 2.0);
+
+            let leaves_to_check = self.agents.find_leaves_in_bounds(bounds);
+            for leaf in leaves_to_check {
+                if let Some(leaf_node) = self.agents.get_leaf_mut(leaf) {
+                    for other_agent_id in leaf_node.agents.iter().copied().collect::<Vec<usize>>() {
+                        if let Some(other_agent) = self.agents.get_agent_mut(other_agent_id) {
+                            if other_agent.status.is_susceptible() {
+                                other_agent.status = Status::Exposed(0);
+                                self.contacts.add_node(other_agent_id, Some(agent_id));
+                                self.infected += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -163,25 +180,28 @@ where
         }
 
         self.move_agents();
+        self.agents.clean_tree();
 
         self.curr_step += 1;
 
+        self.time.advance(self.step_size);
+        self.last_step_duration = now.elapsed().as_millis();
         // TODO(tslnc04): i'm pretty sure this is backwards. if the goal is to
         // keep the ratio between simulation time and real time constant, the
         // step size should increase when the simulation is running slowly
         // but like also this is kinda unnecessary for now, ig that's why it's a todo
-        self.time.advance(self.step_size);
-        let step_duration = now.elapsed().as_millis();
-        if step_duration >= 100 {
-            self.step_size /= 2;
-        } else if step_duration < 10 {
-            self.step_size *= 2;
-        }
+        // if step_duration >= 100 {
+        //     self.step_size /= 2;
+        // } else if step_duration < 10 {
+        //     self.step_size *= 2;
+        // }
     }
 
     fn move_agents(&mut self) {
         let distro = Uniform::from(0.0..1.0);
-        for agent in self.agents.iter_mut() {
+        for agent_id in self.agents.get_agent_ids() {
+            // TODO(tslnc04): get rid of the unwrap
+            let agent = self.agents.get_agent_mut(agent_id).unwrap();
             if agent.status.is_dead() {
                 continue;
             }
@@ -210,7 +230,9 @@ where
                 * agent.speed
                 * self.step_size as f64)
                 .clamp_mag(dir.mag());
-            agent.pos += movement;
+
+            let new_pos = agent.pos + movement;
+            self.agents.move_agent(agent_id, new_pos);
         }
     }
 
@@ -232,18 +254,6 @@ where
             // clamp position to world size
             agent.pos.x = agent.pos.x.clamp(0.0, self.size.x);
             agent.pos.y = agent.pos.y.clamp(0.0, self.size.y);
-        }
-    }
-
-    fn infect_agent(&mut self, recip_agent_id: usize, src_agent_id: usize) -> Option<bool> {
-        if self.agents.get(recip_agent_id)?.status.is_susceptible()
-            && self.agents.get(src_agent_id)?.status.is_infectious()
-        {
-            self.agents.get_mut(recip_agent_id)?.status = Status::Exposed(0);
-            self.contacts.add_node(recip_agent_id, Some(src_agent_id));
-            Some(true)
-        } else {
-            Some(false)
         }
     }
 
@@ -348,12 +358,13 @@ where
         // given grid square. this could be problematic
         writeln!(
             f,
-            "----- Time {:2} {}; Infected {}/{}; Dead {} -----",
+            "----- Time {:2} {}; Infected {}/{}; Dead {}; Step Duration: {} -----",
             self.curr_step,
             self.step_size,
             self.infected,
             self.agents.len(),
             dead,
+            self.last_step_duration,
         )?;
 
         for i in 0..self.size.x.ceil() as i64 {
@@ -396,134 +407,350 @@ where
     }
 }
 
+// TODO(tslnc04): add a way to remove agents from the tree
+// TODO(tslnc04): make the node one type since they're basically the same, the
+// enum just complicates things
 pub struct Quadtree {
-    pos: Vec2D<f64>,
-    dim: Vec2D<f64>,
+    bounds: Rect<f64>,
     leaf_capacity: usize,
-    next_id: usize,
-    pub nodes: HashMap<usize, QuadtreeNode>,
+    next_node_id: usize,
+    next_agent_id: usize,
+    nodes: HashMap<usize, QuadtreeNode>,
+    agents: HashMap<usize, Agent>,
+    agent_to_node: HashMap<usize, usize>,
 }
 
 impl Quadtree {
-    pub fn new(pos: Vec2D<f64>, dim: Vec2D<f64>) -> Self {
+    pub fn new(bounds: Rect<f64>) -> Self {
         let mut new_quadtree = Self {
-            pos,
-            dim,
+            bounds,
             leaf_capacity: 4,
-            next_id: 0,
+            next_node_id: 0,
+            next_agent_id: 0,
             nodes: HashMap::new(),
+            agents: HashMap::new(),
+            agent_to_node: HashMap::new(),
         };
 
-        new_quadtree.add_node(QuadtreeNode::Leaf(QuadtreeLeaf::new(pos, dim)));
+        new_quadtree.add_node(QuadtreeNode::Leaf(QuadtreeLeaf::new(None, bounds)));
 
         new_quadtree
     }
 
-    pub fn get(&self, id: usize) -> Option<&QuadtreeNode> {
+    pub fn new_with_agents(bounds: Rect<f64>, agents: Vec<Agent>) -> Self {
+        let mut new_quadtree = Self::new(bounds);
+
+        for agent in agents {
+            new_quadtree.add_agent(agent).unwrap();
+        }
+
+        new_quadtree
+    }
+
+    /// Returns an iterator over the agents in an arbitrary order
+    pub fn iter(&self) -> impl Iterator<Item = &Agent> {
+        self.agents.values()
+    }
+
+    /// Returns a mutable iterator over the agents in an arbitrary order
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Agent> {
+        self.agents.values_mut()
+    }
+
+    pub fn len(&self) -> usize {
+        self.agents.len()
+    }
+
+    fn get(&self, id: usize) -> Option<&QuadtreeNode> {
         self.nodes.get(&id)
     }
 
-    pub fn get_leaf(&self, id: usize) -> Option<&QuadtreeLeaf> {
-        if let Some(QuadtreeNode::Leaf(leaf)) = self.get(id) {
-            Some(leaf)
-        } else {
-            None
+    fn get_leaf(&self, id: usize) -> Option<&QuadtreeLeaf> {
+        match self.nodes.get(&id) {
+            Some(QuadtreeNode::Leaf(leaf)) => Some(leaf),
+            _ => None,
         }
     }
 
-    pub fn get_mut(&mut self, id: usize) -> Option<&mut QuadtreeNode> {
+    pub fn get_agent(&self, id: usize) -> Option<&Agent> {
+        self.agents.get(&id)
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut QuadtreeNode> {
         self.nodes.get_mut(&id)
     }
 
-    pub fn get_leaf_mut(&mut self, id: usize) -> Option<&mut QuadtreeLeaf> {
-        if let Some(QuadtreeNode::Leaf(leaf)) = self.get_mut(id) {
-            Some(leaf)
-        } else {
-            None
+    fn get_leaf_mut(&mut self, id: usize) -> Option<&mut QuadtreeLeaf> {
+        match self.nodes.get_mut(&id) {
+            Some(QuadtreeNode::Leaf(leaf)) => Some(leaf),
+            _ => None,
         }
     }
 
+    fn get_agent_mut(&mut self, id: usize) -> Option<&mut Agent> {
+        self.agents.get_mut(&id)
+    }
+
+    /// Return all of the agent ids currently being used, in an arbitrary order
+    fn get_agent_ids(&self) -> Vec<usize> {
+        self.agents.keys().copied().collect()
+    }
+
+    /// Adds the node to the quadtree, guaranteed to use self.next_node_id and
+    /// then increment it
     fn add_node(&mut self, node: QuadtreeNode) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.next_node_id;
+        self.next_node_id += 1;
         self.nodes.insert(id, node);
         id
     }
 
+    /// Guaranteed to return a leaf node
     pub fn get_node_for_pos(&self, pos: Vec2D<f64>) -> Option<usize> {
         let mut curr = 0;
 
         loop {
-            if let Some(curr_node) = self.get(curr) {
-                if !curr_node.contains(pos) {
-                    return None;
-                }
+            match self.get(curr) {
+                Some(QuadtreeNode::Leaf(_)) => return Some(curr),
+                Some(QuadtreeNode::Root(root)) => {
+                    if !root.bounds.contains(pos) {
+                        return None;
+                    }
 
-                match curr_node {
-                    QuadtreeNode::Leaf(_) => return Some(curr),
-                    QuadtreeNode::Root(root) => curr = pos.get_bounds_quadrant(root.pos, root.dim),
+                    curr = root.children[root.bounds.get_quadrant(pos)];
                 }
-            } else {
-                return None;
+                None => return None,
             }
         }
+    }
+
+    /// Guaranteed to return a leaf node. The hint is a node to start from. This
+    /// is intended to be used when one is moving an agent, since the agent is
+    /// likely moved to a nearby node in the tree.
+    fn get_node_for_pos_hinted(&self, pos: Vec2D<f64>, hint: usize) -> Option<usize> {
+        let mut curr = hint;
+
+        loop {
+            let curr_node = self.get(curr)?;
+
+            if !curr_node.get_bounds().contains(pos) {
+                curr = curr_node.get_parent()?;
+                continue;
+            }
+
+            match curr_node {
+                QuadtreeNode::Leaf(_) => return Some(curr),
+                QuadtreeNode::Root(root) => {
+                    curr = root.children[root.bounds.get_quadrant(pos)];
+                }
+            }
+        }
+    }
+
+    fn get_node_for_agent(&self, agent_id: usize) -> Option<usize> {
+        self.agent_to_node.get(&agent_id).copied()
     }
 
     pub fn add_agent(&mut self, agent: Agent) -> Option<usize> {
-        if let Some(node_id) = self.get_node_for_pos(agent.pos) {
-            if let Some(node) = self.get_leaf_mut(node_id) {
-                node.agents.push(agent);
-                self.check_capacity(node_id);
-                return Some(node_id);
+        let leaf_id = self.get_node_for_pos(agent.pos)?;
+        let agent_id = self.next_agent_id;
+
+        self.agents.insert(agent_id, agent);
+        self.agent_to_node.insert(agent_id, leaf_id);
+        self.get_leaf_mut(leaf_id)?.agents.push(agent_id);
+
+        self.next_agent_id += 1;
+        self.check_capacity(leaf_id);
+
+        Some(leaf_id)
+    }
+
+    fn check_capacity(&mut self, leaf_id: usize) {
+        let leaf = self.get_leaf(leaf_id).unwrap();
+        if leaf.agents.len() > self.leaf_capacity && leaf.bounds.get_width() > 2.0 {
+            self.split(leaf_id);
+        }
+    }
+
+    pub fn clean_tree(&mut self) {
+        let mut leaf_parents = HashSet::new();
+        for leaf in self.nodes.values().filter(|node| node.is_leaf()) {
+            if let Some(parent) = leaf.get_parent() {
+                leaf_parents.insert(parent);
             }
         }
 
-        None
-    }
-
-    fn check_capacity(&mut self, id: usize) {
-        if let Some(node) = self.get_leaf_mut(id) {
-            if node.agents.len() > self.leaf_capacity {
-                self.split(id);
-            }
-        }
-    }
-
-    fn split(&mut self, id: usize) {
-        let mut children = Vec::new();
-
-        for y in 0..=1 {
-            for x in 0..=1 {
-                if let Some(node) = self.get_leaf_mut(id) {
-                    let mut new_leaf = QuadtreeLeaf::new(
-                        node.pos + Vec2D::new(x as f64, 1.0 - y as f64) * node.dim / 2.0,
-                        node.dim / 2.0,
-                    );
-                    // preferred implementation if drain filter were stabilized
-                    // new_leaf.agents = node
-                    //     .agents
-                    //     .drain_filter(|agent| agent.pos.is_in_bounds(new_leaf.pos, new_leaf.dim))
-                    //     .collect();
-                    let mut i = 0;
-                    while i < node.agents.len() {
-                        if node.agents[i].pos.is_in_bounds(new_leaf.pos, new_leaf.dim) {
-                            new_leaf.agents.push(node.agents.swap_remove(i));
-                        } else {
-                            i += 1;
-                        }
-                    }
-
-                    children.push(self.add_node(QuadtreeNode::Leaf(new_leaf)));
+        for parent_id in leaf_parents.iter() {
+            if let Some(QuadtreeNode::Root(parent)) = self.get(*parent_id) {
+                if parent
+                    .children
+                    .iter()
+                    .all(|child| self.get(*child).unwrap().is_leaf())
+                    && parent
+                        .children
+                        .iter()
+                        .map(|child| self.get_leaf(*child).unwrap().agents.len())
+                        .sum::<usize>()
+                        <= self.leaf_capacity
+                {
+                    self.join(*parent_id);
                 }
             }
         }
-
-        if let Some(node) = self.get_leaf(id) {
-            let new_root = QuadtreeNode::Root(QuadtreeRoot::new(node.pos, node.dim, children));
-
-            self.nodes.insert(id, new_root);
-        }
     }
+
+    fn split(&mut self, id: usize) -> Option<()> {
+        let node = self.get_leaf(id)?;
+        let node_parent = node.parent.clone();
+        let node_bounds = node.bounds;
+        let node_agents = node.agents.clone();
+
+        let mut new_leaves = node_bounds
+            .quarter()
+            .into_iter()
+            .map(|bound| QuadtreeLeaf::new(Some(id), bound))
+            .collect::<Vec<_>>();
+
+        for agent_id in node_agents.into_iter() {
+            let agent = self.get_agent(agent_id)?;
+            let quadrant = node_bounds.get_quadrant(agent.pos);
+            new_leaves[quadrant].agents.push(agent_id);
+            self.agent_to_node
+                .insert(agent_id, self.next_node_id + quadrant);
+        }
+
+        let children = new_leaves
+            .into_iter()
+            .map(|leaf| self.add_node(QuadtreeNode::Leaf(leaf)))
+            .collect::<Vec<_>>();
+
+        self.nodes.insert(
+            id,
+            QuadtreeNode::Root(QuadtreeRoot {
+                parent: node_parent,
+                bounds: node_bounds,
+                children,
+            }),
+        )?;
+
+        Some(())
+    }
+
+    /// Join a root node with leaves as children into a single leaf node
+    fn join(&mut self, id: usize) -> Option<()> {
+        let node = match self.get(id)? {
+            QuadtreeNode::Root(root) => root,
+            _ => return None,
+        };
+        let node_bounds = node.bounds;
+        let node_children = node.children.clone();
+        let node_agents = node_children
+            .iter()
+            .flat_map(|child| {
+                self.get_leaf(*child)
+                    .unwrap()
+                    .agents
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        for agent_id in node_agents.iter() {
+            self.agent_to_node.insert(*agent_id, id);
+        }
+
+        for leaf_id in node_children.iter() {
+            self.nodes.remove(leaf_id);
+        }
+
+        let mut new_leaf = QuadtreeLeaf::new(Some(id), node_bounds);
+        new_leaf.agents = node_agents;
+        self.nodes.insert(id, QuadtreeNode::Leaf(new_leaf))?;
+
+        Some(())
+    }
+
+    /// Find every leaf node which has bounds that overlap with the given bounds
+    pub fn find_leaves_in_bounds(&self, bounds: Rect<f64>) -> Vec<usize> {
+        let mut leaves = Vec::new();
+        let mut to_visit = vec![0];
+
+        while to_visit.len() > 0 {
+            // unwrap since we know the vector isn't empty
+            let curr = to_visit.pop().unwrap();
+
+            match self.get(curr) {
+                Some(QuadtreeNode::Leaf(leaf)) => {
+                    if leaf.bounds.intersects(bounds) {
+                        leaves.push(curr);
+                    }
+                }
+                Some(QuadtreeNode::Root(root)) => {
+                    for child in root.children.iter() {
+                        to_visit.push(*child);
+                    }
+                }
+                None => {}
+            }
+        }
+
+        return leaves;
+    }
+
+    fn move_agent(&mut self, agent_id: usize, new_pos: Vec2D<f64>) -> Option<()> {
+        let node_id = self.get_node_for_agent(agent_id)?;
+        let node_bounds = match self.get(node_id) {
+            Some(QuadtreeNode::Leaf(leaf)) => leaf.bounds,
+            Some(QuadtreeNode::Root(_)) => panic!("it was a root :("),
+            _ => panic!("node not found {}", node_id),
+        };
+
+        if !node_bounds.contains(new_pos) {
+            let new_node_id = self.get_node_for_pos(new_pos)?;
+            let new_node = self.get_leaf_mut(new_node_id)?;
+
+            new_node.agents.push(agent_id);
+            self.agent_to_node.insert(agent_id, new_node_id);
+
+            let curr_node = self.get_leaf_mut(node_id)?;
+            curr_node.agents.retain(|&id| id != agent_id);
+
+            self.check_capacity(new_node_id);
+        }
+
+        self.get_agent_mut(agent_id)?.pos = new_pos;
+
+        Some(())
+    }
+
+    pub fn render_as_svg(&self) -> svg::Document {
+        let mut doc = svg::Document::new().set(
+            "viewBox",
+            (
+                self.bounds.bl.x,
+                self.bounds.bl.y,
+                self.bounds.tr.x,
+                self.bounds.tr.y,
+            ),
+        );
+
+        for node in self.nodes.values() {
+            let rect = svg::node::element::Rectangle::new()
+                .set("x", node.get_bounds().bl.x)
+                .set("y", node.get_bounds().bl.y)
+                .set("width", node.get_bounds().get_width())
+                .set("height", node.get_bounds().get_height())
+                .set("fill", "none")
+                .set("stroke", "black");
+
+            doc = doc.add(rect);
+        }
+
+        doc
+    }
+
+    // TODO(tslnc04): implement rendering using graphviz
 }
 
 pub enum QuadtreeNode {
@@ -532,38 +759,81 @@ pub enum QuadtreeNode {
 }
 
 impl QuadtreeNode {
-    pub fn contains(&self, pos: Vec2D<f64>) -> bool {
+    pub fn contains(&self, point: Vec2D<f64>) -> bool {
         match self {
-            QuadtreeNode::Root(root) => pos.is_in_bounds(root.pos, root.dim),
-            QuadtreeNode::Leaf(leaf) => pos.is_in_bounds(leaf.pos, leaf.dim),
+            QuadtreeNode::Root(root) => root.bounds.contains(point),
+            QuadtreeNode::Leaf(leaf) => leaf.bounds.contains(point),
+        }
+    }
+
+    pub fn intersects(&self, bounds: Rect<f64>) -> bool {
+        match self {
+            QuadtreeNode::Root(root) => root.bounds.intersects(bounds),
+            QuadtreeNode::Leaf(leaf) => leaf.bounds.intersects(bounds),
+        }
+    }
+
+    fn get_bounds(&self) -> Rect<f64> {
+        match self {
+            QuadtreeNode::Root(root) => root.bounds,
+            QuadtreeNode::Leaf(leaf) => leaf.bounds,
+        }
+    }
+
+    fn get_parent(&self) -> Option<usize> {
+        match self {
+            QuadtreeNode::Root(root) => root.parent,
+            QuadtreeNode::Leaf(leaf) => leaf.parent,
+        }
+    }
+
+    fn is_leaf(&self) -> bool {
+        match self {
+            QuadtreeNode::Root(_) => false,
+            QuadtreeNode::Leaf(_) => true,
         }
     }
 }
 
 pub struct QuadtreeRoot {
-    pub pos: Vec2D<f64>,
-    pub dim: Vec2D<f64>,
+    pub parent: Option<usize>,
+    pub bounds: Rect<f64>,
     pub children: Vec<usize>,
 }
 
 impl QuadtreeRoot {
-    pub fn new(pos: Vec2D<f64>, dim: Vec2D<f64>, children: Vec<usize>) -> Self {
-        Self { pos, dim, children }
+    pub fn new(parent: Option<usize>, bounds: Rect<f64>, children: Vec<usize>) -> Self {
+        Self {
+            parent,
+            bounds,
+            children,
+        }
     }
 }
 
 pub struct QuadtreeLeaf {
-    pub pos: Vec2D<f64>,
-    pub dim: Vec2D<f64>,
-    pub agents: Vec<Agent>,
+    pub parent: Option<usize>,
+    pub bounds: Rect<f64>,
+    pub agents: Vec<usize>,
 }
 
 impl QuadtreeLeaf {
-    pub fn new(pos: Vec2D<f64>, dim: Vec2D<f64>) -> Self {
+    pub fn new(parent: Option<usize>, bounds: Rect<f64>) -> Self {
         Self {
-            pos,
-            dim,
+            parent,
+            bounds,
             agents: Vec::new(),
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a mut QuadtreeNode> for &'a mut QuadtreeLeaf {
+    type Error = ();
+
+    fn try_from(value: &'a mut QuadtreeNode) -> Result<Self, Self::Error> {
+        match value {
+            QuadtreeNode::Leaf(leaf) => Ok(leaf),
+            _ => Err(()),
         }
     }
 }
