@@ -19,3 +19,7 @@
 - [X] fix time? somehow it overflows
 - [X] make movements get mirrored in the quadtree
 - [X] make splitting and joining dynamic in the quadtree
+
+## Implementing the Infection
+
+Each agent carries a disease struct with it. When it infects another agent, it does so by providing a copy of the disease struct, but calls a mutation method on the struct. One could expand this further with multiple disease structs per agent and the possibility for disease to confer immunity selectively to other strains.

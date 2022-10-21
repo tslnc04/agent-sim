@@ -1,6 +1,6 @@
 use rand::Rng;
 
-use crate::geometry::Vec2D;
+use crate::{disease::Disease, Vec2D};
 use crate::{BLUE, GREEN, ORANGE, RED, RESET, YELLOW};
 use std::collections::HashMap;
 use std::fmt;
@@ -49,7 +49,6 @@ pub enum Task {
 
 /// Each agent is a distinct entity that gets simulated. It currently only uses
 /// the position and the status to determine infection and recovery.
-#[derive(Debug)]
 pub struct Agent {
     pub pos: Vec2D<f64>,
     pub status: Status,
@@ -63,6 +62,7 @@ pub struct Agent {
     /// age is the time the agent has been alive for, in seconds. This is
     /// relative to the life of the agent, not the simulation.
     pub age: i64,
+    pub disease: Option<Box<dyn Disease>>,
 }
 
 impl Agent {
@@ -76,6 +76,7 @@ impl Agent {
             school: Vec2D::new_nan(),
             speed: speed,
             age: 0,
+            disease: None,
         }
     }
 
@@ -186,7 +187,7 @@ impl ContactGraph {
             index: self.nodes.len(),
             parent: graph_parent,
             children: Vec::new(),
-            agent_id: agent_id,
+            agent_id,
         };
 
         if graph_parent.is_some() {

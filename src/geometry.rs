@@ -7,7 +7,6 @@ pub struct Vec2D<T: num::Float> {
     pub y: T,
 }
 
-// TODO(tslnc04): allow for integer vectors
 impl<T: num::Float> Vec2D<T> {
     pub fn new(x: T, y: T) -> Self {
         Self { x, y }
